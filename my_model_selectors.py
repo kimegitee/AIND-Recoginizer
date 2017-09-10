@@ -77,7 +77,33 @@ class SelectorBIC(ModelSelector):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+
+        best_score = float('inf')
+        best_model = None
+        # Regularizer term, favors simpler models
+        for n in range(self.min_n_components, self.max_n_components+1):
+            try:
+                model = self.base_model(n)
+                # Number of free parameters:
+                # n*(n-1) transition probabilities
+                # n-1 starting probabilities
+                # n*n_features means
+                # n*n_features covariances
+                logL = model.score(self.X, self.lengths)
+                n_samples, n_features = self.X.shape
+                n_params = n*n + 2*n*n_features - 1
+                logN = math.log(n_samples)
+                score = -2*logL + n_params*logN 
+                # Smaller BIC is better
+                if score < best_score:
+                    best_score = score
+                    best_model = model
+            except:
+                if self.verbose:
+                    print("failure on {} with {} states".format(self.this_word, n))
+                continue
+
+        return best_model
 
 
 class SelectorDIC(ModelSelector):
@@ -93,7 +119,26 @@ class SelectorDIC(ModelSelector):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        best_score = float('-inf')
+        best_model = None
+        for n in range(self.min_n_components, self.max_n_components+1):
+            try:
+                model = self.base_model(n)
+                logL_self = model.score(self.X, self.lengths)
+                other_Xlengths = {k: v for k, v in self.hwords.items() if k is not self.this_word}
+                logL_other = sum(model.score(X, lengths)
+                    for X, lengths in other_Xlengths.values()) / len(other_Xlengths)
+                score = logL_self - logL_other
+                # Bigger DIC is better
+                if score > best_score:
+                    best_score = score
+                    best_model = model
+            except:
+                if self.verbose:
+                    print("failure on {} with {} states".format(self.this_word, n))
+                continue
+
+        return best_model
 
 
 class SelectorCV(ModelSelector):
@@ -105,4 +150,45 @@ class SelectorCV(ModelSelector):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # TODO implement model selection using CV
-        raise NotImplementedError
+
+        best_score = float('-inf')
+        best_n_components = self.min_n_components
+
+        if len(self.sequences) <= 2:
+            # Delegate to DIC if there are too few training examples
+            return SelectorDIC(
+                self.words,
+                self.hwords,
+                self.this_word,
+                self.n_constant,
+                self.min_n_components,
+                self.max_n_components,
+                self.random_state
+            ).select()
+
+        for n in range(self.min_n_components, self.max_n_components+1):
+            try:
+                logL_sum = 0
+                n_splits = 3
+                for train_idx, test_idx in KFold(n_splits=n_splits).split(self.sequences):
+                    train_X, train_lengths = combine_sequences(train_idx, self.sequences)
+                    test_X, test_lengths = combine_sequences(test_idx, self.sequences)
+                    # Not using base_model to avoid redundant fitting
+                    model = GaussianHMM(
+                        n_components=n,
+                        covariance_type="diag",
+                        n_iter=1000,
+                        random_state=self.random_state,
+                        verbose=False
+                    ).fit(train_X, train_lengths)
+                    logL_sum += model.score(test_X, test_lengths)
+                score = logL_sum / n_splits
+                if score > best_score:
+                    best_score = score
+                    best_n_components = n
+            except:
+                if self.verbose:
+                    print("failure on {} with {} states".format(self.this_word, n))
+                continue
+
+        return self.base_model(best_n_components)
